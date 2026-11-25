@@ -1,6 +1,7 @@
 local Client = require("raspap_client")
 local DataStorage = require("datastorage")
-local InfoMessage = require("ui/widget/infomessage")
+local Details = require("raspap_details")
+local Icons = require("raspap_icons")
 local KeyValuePage = require("ui/widget/keyvaluepage")
 local LuaSettings = require("luasettings")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
@@ -44,8 +45,8 @@ function Manager:onCloseWidget()
     end
 end
 
-function Manager:message(text)
-    UIManager:show(InfoMessage:new{ text = text })
+function Manager:message(text, title, icon)
+    UIManager:show(Details:new{ text = text, title = title, icon = icon })
 end
 
 function Manager:persistSettings()
@@ -138,7 +139,8 @@ function Manager:testConnection()
     self:withConnection(function(url, key)
         local data, err = Client.get(url, key, "/system")
         self:message(data and (_("API reachable: ") .. data.hostname
-            .. "\n" .. _("This does not test the Pi's internet connection.")) or err)
+            .. "\n" .. _("This does not test the Pi's internet connection.")) or err,
+            _("Connection test"), Icons.system)
     end)
 end
 

@@ -15,15 +15,20 @@ Kindle/Pi compatibility has **not yet been verified**.
   read **[Wi-Fi] hostname** (or Ethernet/other type), using the IP when no
   hostname is available. Typical setups fit on one screen; larger lists paginate.
 - Bordered buttons and cards with a right-aligned **info icon** are clickable.
-  Tap a marked card for its full details; unmarked cards are read-only.
+  Custom server, Wi-Fi and device info icons identify System, Hotspot and Client
+  details. Tap a marked card for a matching rounded dialog with a black header,
+  labeled fields, scrollable full text and a **Close** button.
+- Button press feedback fills the rounded background up to the border,
+  including the favicon, dashboard controls and detail-dialog Close buttons.
 - Network interface addresses.
 - Status/client pages automatically refresh every 15 seconds after each fetch;
   pause/resume and manual refresh are available on the page.
 - Saved API connection settings, connection test and a status-page launcher.
 - Overall API status beside the last-attempt time; transient failures retain
   already loaded cards and clearly mark the page **Stale**, rather than
-  replacing their contents with errors. The title's info icon opens error
-  details and per-section last-success times.
+  replacing their contents with errors. The top-left **RaspAP favicon button**
+  opens styled connection-status details and per-section last-success times.
+  Connection tests, setup guidance and settings messages use the same dialog style.
 
 The [official API](https://docs.raspap.com/features-experimental/restapi/) is
 experimental and read-only in the verified upstream revision
@@ -73,7 +78,8 @@ HTTP transmits it in plaintext.
 
 ## 2. Install in KOReader
 
-1. Copy the entire [`raspapmanager.koplugin`](./raspapmanager.koplugin) folder
+1. Copy the entire [`raspapmanager.koplugin`](./raspapmanager.koplugin) folder,
+   including its bundled [`icons`](./raspapmanager.koplugin/icons),
    into your KOReader installation's `plugins` directory. On many Kindles this
    is `/mnt/us/koreader/plugins/raspapmanager.koplugin`.
 2. Restart KOReader and enable **RaspAP manager** in its plugin manager if needed.
@@ -99,8 +105,8 @@ timeout, HTTP 408/429/5xx or Wi-Fi disconnection. Successful sections still
 update, including a genuinely empty client list. **Partial** means only some
 sections loaded without retaining failed data; **Unavailable** means none
 loaded. Failed sections without cached data show **Not loaded**; error details
-stay in the title's info dialog. Authentication failures, invalid responses and
-other non-transient errors clear the affected section. Changing the server
+stay in the favicon button's details dialog. Authentication failures, invalid
+responses and other non-transient errors clear the affected section. Changing the server
 address or API key clears all cached data. Cached data is held only in memory.
 
 Normal KOReader startup makes no requests. No browser session or extra Pi-side
@@ -174,7 +180,7 @@ launches a new process; it does not navigate an already-running instance.
   and `journalctl -u restapi.service` can help diagnose service failures.
 - **Unexpected response / HTTP 404:** confirm this is the API URL, not the
   RaspAP web-interface URL. Check your API version against the linked upstream
-  routes. The overall status indicates the failure; tap the title's info icon
+  routes. The overall status indicates the failure; tap the top-left RaspAP favicon
   for details. Invalid responses clear the affected section, while other
   successful sections remain visible.
 - **Missing client/IP fields:** optional or null values appear as unavailable.
@@ -213,7 +219,8 @@ Tests use the real JSON decoder and mocked KOReader UI/network transports.
 They check request safety, response parsing, timeout restoration, error
 handling, settings save/reload/removal and LAN-only menu/refresh behavior.
 Dashboard tests cover automatic refresh, measured card layout, contrasting
-flush rounded headers, right-aligned info icons, section headings, pagination,
+flush rounded headers, custom info icons, the bundled favicon, matching
+scrollable detail dialogs, rounded button press feedback, section headings, pagination,
 client formatting/sorting, stale-data retention, cache invalidation,
 pause/resume, hidden/suspended/closed pages, failure recovery and one-shot
 startup. Layout tests use Paperwhite-sized geometry with mocked font metrics;
@@ -232,9 +239,13 @@ They do not prove physical-device compatibility or perform a real TLS handshake.
    hostnames and an empty client list. Check that card headers are white on
    black without white insets, borders are rounded, section headings separate
    details from clients, and only buttons or cards with info icons respond to
-   taps. Check suspend/resume and close the page to confirm polling stops.
+   taps. Confirm the three card types open matching detail icons, long detail
+   text scrolls, and Close returns to the dashboard. Tap the top-left RaspAP
+   favicon for connection status. Check pressed button backgrounds meet their
+   rounded borders without an inset or square-corner spill. Check suspend/resume
+   and close the page to confirm polling stops.
 5. Stop the API or disconnect Wi-Fi after loading: cards should retain their
-   data, with **Stale** beside the last-attempt time. Tap the title's info icon
+   data, with **Stale** beside the last-attempt time. Tap the RaspAP favicon
    for useful errors. Restore access and verify recovery. Test a wrong key or
    changed API address: old data must disappear rather than remain cached.
 6. Remove the Pi's upstream internet connection: LAN status should still work.
@@ -245,3 +256,13 @@ They do not prove physical-device compatibility or perform a real TLS handshake.
 9. After configuring the key again, exit KOReader and run the status launcher.
    Confirm it opens the dashboard once; opening a book afterwards must not
    reopen it. A normal launch should keep KOReader's usual startup behavior.
+
+## Icon attribution
+
+The bundled [RaspAP favicon](./raspapmanager.koplugin/icons/raspap.png) is copied
+unchanged from
+[RaspAP/raspap-webgui](https://github.com/RaspAP/raspap-webgui/blob/515025abcf2cbe8976b383f78ea0af549a9415c7/app/icons/favicon-96x96.png),
+revision `515025a`, under its GNU GPL v3 license. The upstream
+[license text](./raspapmanager.koplugin/icons/RaspAP-LICENSE) is included alongside
+the image. The System, Hotspot and Client SVG info icons are custom artwork
+for this plugin. All icons load locally; no runtime asset downloads are needed.

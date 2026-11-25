@@ -1,7 +1,8 @@
 local Client = require("raspap_client")
 local Card = require("raspap_card")
 local Blitbuffer = require("ffi/blitbuffer")
-local Button = require("ui/widget/button")
+local Button = require("raspap_button")
+local Details = require("raspap_details")
 local Device = require("device")
 local Font = require("ui/font")
 local FrameContainer = require("ui/widget/container/framecontainer")
@@ -9,7 +10,7 @@ local Geom = require("ui/geometry")
 local GestureRange = require("ui/gesturerange")
 local HorizontalGroup = require("ui/widget/horizontalgroup")
 local HorizontalSpan = require("ui/widget/horizontalspan")
-local InfoMessage = require("ui/widget/infomessage")
+local Icons = require("raspap_icons")
 local InputContainer = require("ui/widget/container/inputcontainer")
 local NetworkMgr = require("ui/network/manager")
 local TextWidget = require("ui/widget/textwidget")
@@ -66,15 +67,25 @@ function Status:buildLayout()
     local columns = content_width >= Screen:scaleBySize(360) and 2 or 1
     self.columns = columns
     local card_width = math.floor((content_width - (columns - 1) * gap) / columns)
-    local title = TitleBar:new{
+    local status_button = Button:new{
+        icon = "notice-info", icon_file = Icons.raspap,
+        icon_width = Screen:scaleBySize(24), icon_height = Screen:scaleBySize(24),
+        width = Screen:scaleBySize(36), padding = Screen:scaleBySize(4),
+        radius = Screen:scaleBySize(4),
+        callback = function() self:showRefreshStatus() end,
+    }
+    self.titlebar = TitleBar:new{
         title = self.title,
         subtitle = self.subtitle,
-        width = content_width,
+        subtitle_fullwidth = true,
+        width = content_width - status_button:getSize().w - gap,
         title_top_padding = 0,
         button_padding = Screen:scaleBySize(4),
-        left_icon = "notice-info",
-        left_icon_tap_callback = function() self:showRefreshStatus() end,
         close_callback = function() self:onClose() end,
+    }
+    local title = HorizontalGroup:new{
+        align = "center", allow_mirroring = false,
+        status_button, HorizontalSpan:new{ width = gap }, self.titlebar,
     }
     local button_width = math.floor((content_width - gap) / 2)
     local function button(text, callback, size, enabled)
@@ -85,6 +96,7 @@ function Status:buildLayout()
         }
     end
     self.controls = {
+        status = status_button,
         refresh = button(_("Refresh now"), function() self:refresh() end, button_width),
         pause = button(self.auto_refresh and _("Pause updates") or _("Resume updates"), function()
             self.auto_refresh = not self.auto_refresh
@@ -186,6 +198,7 @@ function Status:buildLayout()
             local data = self.cards[index]
             local card = Card:new{
                 width = card_width, label = data.label, body = data.body, callback = data.callback,
+                icon = data.icon,
             }
             table.insert(self.card_widgets, card)
             table.insert(row, card)
@@ -266,13 +279,16 @@ end
 function Status:render()
     self.cards = {}
     self.client_summary = _("Clients: unavailable")
-    local function info(section, label, body, loaded)
+    local function info(section, label, body, loaded, icon, details)
         table.insert(self.cards, {
             section = section,
             label = label,
             body = body,
+            icon = icon,
             callback = loaded and function()
-                UIManager:show(InfoMessage:new{ text = label .. "\n\n" .. body })
+                UIManager:show(Details:new{
+                    title = label, icon = icon, text = details or body,
+                })
             end or nil,
         })
     end
@@ -283,13 +299,17 @@ function Status:render()
             if system.hostapdStatus == 1 then state = _("Running")
             elseif system.hostapdStatus == 0 then state = _("Stopped") end
             info("details", _("System"), display(system.hostname) .. "\n" .. display(system.uptime)
-                .. "\n" .. _("Hotspot: ") .. state, true)
+                .. "\n" .. _("Hotspot: ") .. state, true, Icons.system,
+                _("Hostname: ") .. display(system.hostname) .. "\n\n"
+                .. _("Uptime: ") .. display(system.uptime) .. "\n\n" .. _("Hotspot: ") .. state)
         else
             info("details", _("System"), _("Not loaded"))
         end
         if ap then
             info("details", _("Hotspot"), _("SSID: ") .. display(ap.ssid) .. "\n"
-                .. display(ap.interface) .. "  |  " .. _("Channel: ") .. display(ap.channel), true)
+                .. display(ap.interface) .. "  |  " .. _("Channel: ") .. display(ap.channel), true, Icons.hotspot,
+                _("SSID: ") .. display(ap.ssid) .. "\n\n" .. _("Interface: ") .. display(ap.interface)
+                .. "\n\n" .. _("Channel: ") .. display(ap.channel))
         else
             info("details", _("Hotspot"), _("Not loaded"))
         end
@@ -316,7 +336,11 @@ function Status:render()
             local label = "[" .. connection .. "] " .. clientName(client)
             local details = _("IP: ") .. display(client.ip_address) .. "\n"
                 .. _("MAC: ") .. display(client.mac_address)
-            info("clients", label, details, true)
+            info("clients", label, details, true, Icons.client,
+                _("Hostname: ") .. display(client.hostname) .. "\n\n"
+                .. _("Connection: ") .. connection .. "\n\n"
+                .. _("IP: ") .. display(client.ip_address) .. "\n\n"
+                .. _("MAC: ") .. display(client.mac_address))
         end
     end
     self.section_titles = { details = _("System / Hotspot"), clients = self.client_summary }
@@ -339,7 +363,10 @@ function Status:showRefreshStatus()
             table.insert(details, section[2] .. " - " .. _("Last success: ") .. updated)
         end
     end
-    UIManager:show(InfoMessage:new{ text = table.concat(details, "\n\n") })
+    UIManager:show(Details:new{
+        title = _("RaspAP connection status"), icon = Icons.raspap,
+        text = table.concat(details, "\n\n"),
+    })
 end
 
 function Status:refresh()

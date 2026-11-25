@@ -13,6 +13,9 @@
   card rendering in [raspap_card.lua](raspapmanager.koplugin/raspap_card.lua),
   and settings/menu/startup integration in
   [main.lua](raspapmanager.koplugin/main.lua).
+- Reuse [raspap_details.lua](raspapmanager.koplugin/raspap_details.lua) for styled
+  information dialogs and [raspap_button.lua](raspapmanager.koplugin/raspap_button.lua)
+  for rounded button feedback. Shared dialogs reuse the card header renderer.
 
 ## Lua and KOReader pitfalls
 
@@ -30,8 +33,15 @@
   frame padding. Preserve rounded top corners and let the native frame paint
   its border and children. Keep text padding separate from background coverage.
 - Reserve header width for the info icon so long labels cannot overlap it.
-  `notice-info` with `invert=true` gives white-on-black rendering; disable
-  mirroring on the header layout to keep the icon physically right-aligned.
+  Load bundled icons through `IconWidget.file`, not `icon` (which searches
+  KOReader's theme directories). Use
+  [raspap_icons.lua](raspapmanager.koplugin/raspap_icons.lua) for plugin-relative
+  asset paths. Flatten monochrome icons before inversion
+  for white-on-black headers; retain alpha for the non-inverted favicon.
+  Disable header mirroring to keep the icon physically right-aligned.
+- Native Button feedback with an explicit radius uses rectangular frame
+  inversion. Repaint background/foreground colors with the original radius
+  instead, so feedback meets the border without spilling into rounded corners.
 - Free replaced widget trees during recurring layout rebuilds. Include section
   headings, gaps, footers and navigation in pagination measurements; never
   orphan a heading from its first card row.
