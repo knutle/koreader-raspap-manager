@@ -8,10 +8,22 @@ Kindle/Pi compatibility has **not yet been verified**.
 
 - Pi hostname/uptime and hotspot running/stopped state.
 - Hotspot SSID, interface and channel (never its password).
-- Reported client count and client hostname, IP, MAC and connection type.
+- Compact two-column dashboard with reported client count and sorted client
+  cards: hostname, connection type, IP and MAC. Separate **System / Hotspot**
+  and **Clients** headings organize the cards. Black headers extend to the
+  rounded edges with white text; data sits in the white body. Client headers
+  read **[Wi-Fi] hostname** (or Ethernet/other type), using the IP when no
+  hostname is available. Typical setups fit on one screen; larger lists paginate.
+- Bordered buttons and cards with a right-aligned **info icon** are clickable.
+  Tap a marked card for its full details; unmarked cards are read-only.
 - Network interface addresses.
-- Saved API connection settings, connection test and manual refresh.
-- Section-specific errors instead of substituting empty or stale results.
+- Status/client pages automatically refresh every 15 seconds after each fetch;
+  pause/resume and manual refresh are available on the page.
+- Saved API connection settings, connection test and a status-page launcher.
+- Overall API status beside the last-attempt time; transient failures retain
+  already loaded cards and clearly mark the page **Stale**, rather than
+  replacing their contents with errors. The title's info icon opens error
+  details and per-section last-success times.
 
 The [official API](https://docs.raspap.com/features-experimental/restapi/) is
 experimental and read-only in the verified upstream revision
@@ -71,11 +83,66 @@ HTTP transmits it in plaintext.
    placement may vary by KOReader version).
 5. Enter the API URL and key, save, then select **Test connection**.
 6. Open **Status**, **Connected clients** or **Network interfaces**.
-   Tap the first **Refresh** row to fetch new data.
+   The status/client pages update automatically. Tap **Refresh now** to fetch
+   immediately, or **Pause updates** / **Resume updates**. Swipe or use the page
+   controls to browse clients; automatic updates preserve the page number
+   unless the list shrinks. Network interfaces still uses manual **Refresh**.
 
-No background polling, startup requests, browser session, or extra Pi-side
-software beyond RaspAP's API is required. Internet access is not required:
-the plugin uses KOReader's LAN-connected helper, not its internet-online check.
+Polling stops on close and suspend, and skips requests while another dialog
+covers the dashboard. Polling does not repeatedly prompt to reconnect or turn
+Wi-Fi on. Reconnect normally to resume updates. Pause or close the dashboard
+to reduce battery use.
+
+**Online** means all API requests succeeded, not that the Pi has internet.
+**Stale** means some visible data was retained after a connection failure,
+timeout, HTTP 408/429/5xx or Wi-Fi disconnection. Successful sections still
+update, including a genuinely empty client list. **Partial** means only some
+sections loaded without retaining failed data; **Unavailable** means none
+loaded. Failed sections without cached data show **Not loaded**; error details
+stay in the title's info dialog. Authentication failures, invalid responses and
+other non-transient errors clear the affected section. Changing the server
+address or API key clears all cached data. Cached data is held only in memory.
+
+Normal KOReader startup makes no requests. No browser session or extra Pi-side
+software beyond RaspAP's API is required. Internet access is not required: the
+plugin uses KOReader's LAN-connected helper, not its internet-online check.
+
+### Launch directly into the status page
+
+Configure the connection and enable the plugin first, then **fully exit
+KOReader**. Copy [`scripts/koreader-raspap.sh`](./scripts/koreader-raspap.sh)
+onto the Kindle, for example beside `koreader.sh`, and run:
+
+```sh
+sh /mnt/us/koreader/koreader-raspap.sh
+```
+
+For a KUAL custom launcher action, use:
+
+```sh
+sh /mnt/us/koreader/koreader-raspap.sh --kual
+```
+
+The script calls the normal Kindle `koreader.sh` (preserving its device setup,
+logging and cleanup), forwarding all arguments. It defaults to
+`/mnt/us/koreader`; override `KOREADER_DIR` for a different installation:
+
+```sh
+KOREADER_DIR='/mnt/us/other-koreader' sh /path/to/koreader-raspap.sh
+```
+
+The equivalent minimal shell scriptlet is:
+
+```sh
+RASPAP_STATUS_ON_START=1 /mnt/us/koreader/koreader.sh
+```
+
+The plugin consumes this environment flag once per KOReader process and opens
+the status dashboard after initialization, not every time a book is opened.
+KOReader restarts within the same launcher inherit the flag and open the
+dashboard again. Launch KOReader normally to retain its usual startup behavior.
+No persistent startup setting or upstream KOReader file is modified. This
+launches a new process; it does not navigate an already-running instance.
 
 ### Credentials and HTTPS
 
@@ -107,12 +174,16 @@ the plugin uses KOReader's LAN-connected helper, not its internet-online check.
   and `journalctl -u restapi.service` can help diagnose service failures.
 - **Unexpected response / HTTP 404:** confirm this is the API URL, not the
   RaspAP web-interface URL. Check your API version against the linked upstream
-  routes. Failed sections are labeled unavailable while others remain visible.
+  routes. The overall status indicates the failure; tap the title's info icon
+  for details. Invalid responses clear the affected section, while other
+  successful sections remain visible.
 - **Missing client/IP fields:** optional or null values appear as unavailable.
   An empty client list is explicitly distinguished from a request error.
-- **Slow screen:** requests are synchronous and user-initiated, with a
+- **Slow screen:** requests are synchronous (including automatic refresh), with a
   3-second socket-block timeout, an 8-second transfer budget and a 256 KiB
-  response limit per endpoint. Summary loads three endpoints sequentially.
+  response limit per endpoint. Status loads three endpoints sequentially;
+  the clients-only page loads one. The next 15-second delay starts after
+  completion, so requests never overlap.
   DNS lookup and OS socket behavior can exceed these budgets; they are not a
   hard wall-clock guarantee. Prefer a numeric Pi address on unreliable DNS.
 
@@ -120,12 +191,15 @@ the plugin uses KOReader's LAN-connected helper, not its internet-online check.
 
 Production uses only libraries bundled with KOReader. Local tests need Lua 5.1
 or LuaJIT and `dkjson` (also bundled with KOReader); no live Pi is needed.
+Launcher tests use a POSIX shell; ShellCheck is optional for shell linting.
 
 From the repository root:
 
 ```sh
 lua5.1 tests/run.lua
 luac5.1 -p raspapmanager.koplugin/*.lua tests/run.lua
+sh tests/launcher.sh
+shellcheck scripts/koreader-raspap.sh tests/launcher.sh
 ```
 
 Use your executable names (`lua`, `luajit`, `luac`) as appropriate. If `dkjson`
@@ -138,6 +212,14 @@ LUA_PATH='/path/to/koreader/common/?.lua;;' lua5.1 tests/run.lua
 Tests use the real JSON decoder and mocked KOReader UI/network transports.
 They check request safety, response parsing, timeout restoration, error
 handling, settings save/reload/removal and LAN-only menu/refresh behavior.
+Dashboard tests cover automatic refresh, measured card layout, contrasting
+flush rounded headers, right-aligned info icons, section headings, pagination,
+client formatting/sorting, stale-data retention, cache invalidation,
+pause/resume, hidden/suspended/closed pages, failure recovery and one-shot
+startup. Layout tests use Paperwhite-sized geometry with mocked font metrics;
+physical appearance still needs device verification.
+The shell test uses a fake KOReader launcher to verify prerequisites,
+environment flags, argument quoting and exit-status forwarding.
 They do not prove physical-device compatibility or perform a real TLS handshake.
 
 ### Manual Kindle/Pi smoke checklist
@@ -145,11 +227,21 @@ They do not prove physical-device compatibility or perform a real TLS handshake.
 1. Enable the API, authorize `/system` in the API docs, and join the Pi network.
 2. Install/restart KOReader. Check the menu from both file manager and reader.
 3. Save settings, restart KOReader, and confirm the connection still works.
-4. Compare status, clients and interface addresses with RaspAP. Check refresh
-   and pagination, including long hostnames and an empty client list.
-5. Test a wrong key, stopped API and unreachable address; verify useful errors.
+4. Compare status, clients and interface addresses with RaspAP. Check automatic
+   refresh, pause/resume, client-card details and pagination, including long
+   hostnames and an empty client list. Check that card headers are white on
+   black without white insets, borders are rounded, section headings separate
+   details from clients, and only buttons or cards with info icons respond to
+   taps. Check suspend/resume and close the page to confirm polling stops.
+5. Stop the API or disconnect Wi-Fi after loading: cards should retain their
+   data, with **Stale** beside the last-attempt time. Tap the title's info icon
+   for useful errors. Restore access and verify recovery. Test a wrong key or
+   changed API address: old data must disappear rather than remain cached.
 6. Remove the Pi's upstream internet connection: LAN status should still work.
 7. If using HTTPS, verify a trusted matching certificate works and an untrusted
    or mismatched certificate is rejected before the API key is sent.
 8. Clear the saved key, restart, and confirm requests require configuration.
    Rotate the key in RaspAP if device backups may contain it.
+9. After configuring the key again, exit KOReader and run the status launcher.
+   Confirm it opens the dashboard once; opening a book afterwards must not
+   reopen it. A normal launch should keep KOReader's usual startup behavior.

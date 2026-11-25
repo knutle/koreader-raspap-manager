@@ -5,12 +5,14 @@ local KeyValuePage = require("ui/widget/keyvaluepage")
 local LuaSettings = require("luasettings")
 local MultiInputDialog = require("ui/widget/multiinputdialog")
 local NetworkMgr = require("ui/network/manager")
+local StatusPage = require("raspap_status")
 local UIManager = require("ui/uimanager")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local _ = require("gettext")
 
 local DEFAULT_URL = "http://10.3.141.1:8081"
 local WARNING = _("The API key is saved unencrypted in KOReader settings. HTTP also sends it in plaintext. Use only a trusted LAN, or verified HTTPS. Do not expose port 8081 to the internet.")
+local startup_requested = os.getenv("RASPAP_STATUS_ON_START") == "1"
 
 local Manager = WidgetContainer:extend{
     name = "raspapmanager",
@@ -25,6 +27,21 @@ end
 function Manager:init()
     self.settings = LuaSettings:open(DataStorage:getSettingsDir() .. "/raspapmanager.lua")
     self.ui.menu:registerToMainMenu(self)
+    if startup_requested then
+        startup_requested = false
+        self.startup_task = function()
+            self.startup_task = nil
+            self:showStatus("summary")
+        end
+        UIManager:nextTick(self.startup_task)
+    end
+end
+
+function Manager:onCloseWidget()
+    if self.startup_task then UIManager:unschedule(self.startup_task) end
+    if self.status_page and UIManager:isWidgetShown(self.status_page) then
+        UIManager:close(self.status_page)
+    end
 end
 
 function Manager:message(text)
@@ -126,6 +143,20 @@ function Manager:testConnection()
 end
 
 function Manager:showStatus(kind, previous_page)
+    if kind ~= "networking" then
+        self:withConnection(function()
+            if self.status_page and UIManager:isWidgetShown(self.status_page) then
+                UIManager:close(self.status_page)
+            end
+            self.status_page = StatusPage:new{
+                settings = self.settings,
+                default_url = DEFAULT_URL,
+                clients_only = kind == "clients",
+            }
+            UIManager:show(self.status_page)
+        end)
+        return
+    end
     self:withConnection(function(url, key)
         local rows = {}
         local function row(label, value) table.insert(rows, { label, display(value) }) end
@@ -134,64 +165,26 @@ function Manager:showStatus(kind, previous_page)
             if not data then row(label, _("Unavailable: ") .. err) end
             return data
         end
-        if kind == "summary" then
-            local system = fetch("/system", _("System"))
-            if system then
-                row(_("Hostname"), system.hostname)
-                row(_("Uptime"), system.uptime)
-                local state
-                if system.hostapdStatus == 1 then state = _("Running")
-                elseif system.hostapdStatus == 0 then state = _("Stopped") end
-                row(_("Hotspot"), state)
-            end
-            local ap = fetch("/ap", _("Hotspot details"))
-            if ap then
-                row(_("SSID"), ap.ssid)
-                row(_("Hotspot interface"), ap.interface)
-                row(_("Channel"), ap.channel)
-            end
-            local clients = fetch("/clients", _("Clients"))
-            if clients then row(_("Reported clients"), clients.active_clients_amount) end
-            row(_("Pi internet connectivity"), _("Not exposed by the API"))
-        elseif kind == "clients" then
-            local clients = fetch("/clients", _("Clients"))
-            if clients then
-                row(_("Reported clients"), clients.active_clients_amount)
-                if #clients.active_clients == 0 then row(_("Client list"), _("No clients returned")) end
-                for i, client in ipairs(clients.active_clients) do
-                    row(string.format(_("Client %d"), i), client.hostname)
-                    row(_("IP address"), client.ip_address)
-                    row(_("MAC address"), client.mac_address)
-                    row(_("Connection type"), client.connection_type)
-                end
-            end
-        elseif kind == "networking" then
-            local network = fetch("/networking", _("Network interfaces"))
-            if network then
-                local names = {}
-                for name in pairs(network.interfaces) do table.insert(names, name) end
-                table.sort(names)
-                if #names == 0 then row(_("Interfaces"), _("No interfaces returned")) end
-                for i = 1, #names do
-                    local name = names[i]
-                    local interface = network.interfaces[name]
-                    row(_("Interface"), name)
-                    row(_("IP address"), interface.IP_address)
-                    row(_("Netmask"), interface.Netmask)
-                    row(_("MAC address"), interface.MAC_address)
-                end
+        local network = fetch("/networking", _("Network interfaces"))
+        if network then
+            local names = {}
+            for name in pairs(network.interfaces) do table.insert(names, name) end
+            table.sort(names)
+            if #names == 0 then row(_("Interfaces"), _("No interfaces returned")) end
+            for i = 1, #names do
+                local name = names[i]
+                local interface = network.interfaces[name]
+                row(_("Interface"), name)
+                row(_("IP address"), interface.IP_address)
+                row(_("Netmask"), interface.Netmask)
+                row(_("MAC address"), interface.MAC_address)
             end
         end
         table.insert(rows, 1, { _("Refresh"), _("Tap to fetch again"), callback = function(page)
             self:showStatus(kind, page)
         end })
-        local titles = {
-            summary = _("RaspAP status"),
-            clients = _("RaspAP clients"),
-            networking = _("RaspAP interfaces"),
-        }
         if previous_page then UIManager:close(previous_page) end
-        UIManager:show(KeyValuePage:new{ title = titles[kind], kv_pairs = rows })
+        UIManager:show(KeyValuePage:new{ title = _("RaspAP interfaces"), kv_pairs = rows })
     end)
 end
 

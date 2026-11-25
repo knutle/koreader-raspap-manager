@@ -156,18 +156,20 @@ function Client.get(url, key, endpoint)
     socketutil:set_timeout(old_block, old_total)
     http.TIMEOUT, https.TIMEOUT = old_http, old_https
 
-    if sink_error then return nil, sink_error end
+    if sink_error then return nil, sink_error, bytes > MAX_BYTES and "response" or "transient" end
     if not ok or not result then
         if code == "timeout" or code == socketutil.SINK_TIMEOUT_CODE then
-            return nil, _("Connection timed out. Check the Pi address, Wi-Fi and REST API service.")
+            return nil, _("Connection timed out. Check the Pi address, Wi-Fi and REST API service."), "transient"
         end
-        return nil, _("Cannot reach RaspAP. Check the address, Wi-Fi, REST API service and HTTPS certificate if applicable.")
+        return nil, _("Cannot reach RaspAP. Check the address, Wi-Fi, REST API service and HTTPS certificate if applicable."), "transient"
     end
     code = tonumber(code)
     if code == 401 or code == 403 then
         return nil, _("Authentication failed. Check the API key in RaspAP's RestAPI settings.")
     elseif code ~= 200 then
-        return nil, string.format(_("RaspAP returned HTTP %s. Check the API address and version; redirects are not followed."), code or "?")
+        local transient = code and ((code >= 500 and code <= 599) or code == 408 or code == 429)
+        return nil, string.format(_("RaspAP returned HTTP %s. Check the API address and version; redirects are not followed."), code or "?"),
+            transient and "transient" or nil
     end
     local body = table.concat(chunks)
     local decoded_ok, data, position, decode_error = pcall(JSON.decode, body, 1, JSON.null)

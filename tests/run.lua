@@ -61,8 +61,18 @@ function container:extend(options)
 end
 function container:new(options)
     local instance = setmetatable(options or {}, self)
-    instance:init()
+    if instance._init then instance:_init() end
+    if instance.init then instance:init() end
     return instance
+end
+function container:free()
+    self.freed = true
+    for _, child in ipairs(self) do
+        if child.free then child:free() end
+    end
+end
+function container:getSize()
+    return self.dimen or self[1]:getSize()
 end
 local dialog = {}
 function dialog:new(options)
@@ -75,13 +85,112 @@ package.loaded["ui/widget/container/widgetcontainer"] = container
 package.loaded["ui/widget/infomessage"] = widget
 package.loaded["ui/widget/keyvaluepage"] = widget
 package.loaded["ui/widget/multiinputdialog"] = dialog
+local screen = {}
+function screen:getWidth() return state.screen_width end
+function screen:getHeight() return state.screen_height end
+function screen:scaleBySize(value) return math.floor(value * state.screen_scale + 0.5) end
+package.loaded.device = { screen = screen, hasKeys = function() return false end }
+package.loaded["ui/font"] = {
+    getFace = function(_, _name, size) return { size = size * state.screen_scale } end,
+}
+package.loaded["ffi/blitbuffer"] = { COLOR_BLACK = "black", COLOR_WHITE = "white" }
+package.loaded["ui/geometry"] = { new = function(_, value) return value end }
+package.loaded["ui/gesturerange"] = widget
+local input = container:extend{}
+function input:_init() self.ges_events, self.key_events = {}, {} end
+package.loaded["ui/widget/container/inputcontainer"] = input
+local function visual(kind)
+    local class = container:extend{ kind = kind }
+    function class:getSize()
+        if kind == "text" then
+            return {
+                w = math.min(self.max_width or math.huge, #self.text * self.face.size * 0.55),
+                h = self.face.size * 1.25,
+            }
+        elseif kind == "textbox" then
+            local line = self.face.size * (1 + self.line_height)
+            return { w = self.width, h = math.floor(self.height / line) * line }
+        elseif kind == "button" then
+            return { w = self.width, h = self.text_font_size * state.screen_scale * 1.25 + 2 * self.padding + 4 }
+        elseif kind == "title" then
+            return { w = self.width, h = (20 + 13) * state.screen_scale * 1.25 + 2 * self.button_padding }
+        elseif kind == "horizontal-span" then
+            return { w = self.width, h = 0 }
+        elseif kind == "vertical-span" then
+            return { w = 0, h = self.width }
+        elseif kind == "left" then
+            return self.dimen
+        elseif kind == "icon" then
+            return { w = self.width, h = self.height }
+        elseif kind == "frame" then
+            local size = self[1]:getSize()
+            local pad = 2 * (self.padding or 0) + 2 * (self.bordersize or 0)
+            return { w = size.w + pad, h = size.h + pad }
+        end
+        if self._size then return self._size end
+        local width, height = 0, 0
+        for _, child in ipairs(self) do
+            local size = child:getSize()
+            if kind == "horizontal" then
+                width, height = width + size.w, math.max(height, size.h)
+            else
+                width, height = math.max(width, size.w), height + size.h
+            end
+        end
+        self._size = { w = width, h = height }
+        return self._size
+    end
+    function class:setText(text) self.text = text end
+    function class:disable() self.enabled = false end
+    function class:paintTo(_bb, x, y)
+        self.painted_at = { x = x, y = y }
+    end
+    return class
+end
+for name, kind in pairs({
+    ["ui/widget/textwidget"] = "text",
+    ["ui/widget/textboxwidget"] = "textbox",
+    ["ui/widget/button"] = "button",
+    ["ui/widget/titlebar"] = "title",
+    ["ui/widget/iconwidget"] = "icon",
+    ["ui/widget/horizontalspan"] = "horizontal-span",
+    ["ui/widget/verticalspan"] = "vertical-span",
+    ["ui/widget/horizontalgroup"] = "horizontal",
+    ["ui/widget/verticalgroup"] = "vertical",
+    ["ui/widget/container/framecontainer"] = "frame",
+    ["ui/widget/container/leftcontainer"] = "left",
+}) do
+    package.loaded[name] = visual(kind)
+end
 package.loaded["ui/uimanager"] = {
-    show = function(_, value) table.insert(shown, value) end,
-    close = function(_, value) table.insert(closed, value) end,
+    show = function(_, value)
+        table.insert(shown, value)
+        table.insert(state.stack, value)
+        if value.onShow then value:onShow() end
+    end,
+    close = function(_, value)
+        table.insert(closed, value)
+        if value.onCloseWidget then value:onCloseWidget() end
+        for i = #state.stack, 1, -1 do
+            if state.stack[i] == value then table.remove(state.stack, i) end
+        end
+    end,
+    scheduleIn = function(_, delay, callback) state.jobs[callback] = delay end,
+    nextTick = function(_, callback) state.jobs[callback] = 0 end,
+    unschedule = function(_, callback) state.jobs[callback] = nil end,
+    getTopmostVisibleWidget = function() return state.stack[#state.stack] end,
+    isWidgetShown = function(_, value)
+        for i = 1, #state.stack do
+            if state.stack[i] == value then return true end
+        end
+        return false
+    end,
+    setDirty = function() end,
 }
 package.loaded["ui/network/manager"] = {
     runWhenConnected = function(_, callback) state.connected = state.connected + 1; callback() end,
     runWhenOnline = function() error("Internet connectivity must not be required") end,
+    isConnected = function() return state.is_connected end,
 }
 package.loaded.datastorage = { getSettingsDir = function() return "." end }
 package.loaded.luasettings = {
@@ -91,11 +200,25 @@ package.loaded.luasettings = {
 }
 
 local Client = require("raspap_client")
-local Manager = dofile("raspapmanager.koplugin/main.lua")
+local function loadManager(startup)
+    local original_getenv = os.getenv
+    os.getenv = function(name)
+        if name == "RASPAP_STATUS_ON_START" then return startup end
+        return original_getenv(name)
+    end
+    local ok, class = pcall(dofile, "raspapmanager.koplugin/main.lua")
+    os.getenv = original_getenv
+    assert(ok, class)
+    return class
+end
+local Manager = loadManager()
 local function reset()
     os.remove(temp)
     os.remove(temp .. ".old")
-    state, shown, closed, now = { connected = 0, calls = 0 }, {}, {}, 0
+    state, shown, closed, now = {
+        connected = 0, calls = 0, jobs = {}, stack = {}, is_connected = true,
+        screen_width = 1072, screen_height = 1448, screen_scale = 300 / 167,
+    }, {}, {}, 0
     http.PROXY = nil
     http.TIMEOUT, https.TIMEOUT = 41, 42
     socketutil.block_timeout, socketutil.total_timeout = 41, 99
@@ -134,13 +257,31 @@ local function test(name, callback)
         print("FAIL " .. name .. ": " .. tostring(err))
     end
 end
-local function manager()
-    return Manager:new{ ui = { menu = { registerToMainMenu = function() state.registered = true end } } }
+local function manager(class)
+    return (class or Manager):new{ ui = { menu = { registerToMainMenu = function() state.registered = true end } } }
 end
 local function rows(page)
     local text = {}
-    for _, row in ipairs(page.kv_pairs) do table.insert(text, row[1] .. ": " .. row[2]) end
+    if page.cards then
+        table.insert(text, page.client_summary or "")
+        for _, card in ipairs(page.cards) do table.insert(text, card.label .. ": " .. card.body) end
+        if not page.clients_only then table.insert(text, "Pi internet connectivity: not exposed by the API") end
+    else
+        for _, row in ipairs(page.kv_pairs) do table.insert(text, row[1] .. ": " .. row[2]) end
+    end
     return table.concat(text, "\n")
+end
+local function runScheduled(callback)
+    assert(state.jobs[callback] ~= nil, "callback is not scheduled")
+    state.jobs[callback] = nil
+    callback()
+end
+local function openStatus(plugin, kind)
+    plugin:showStatus(kind or "summary")
+    local page = plugin.status_page
+    equal(state.jobs[page.refresh_task], 0)
+    runScheduled(page.refresh_task)
+    return page
 end
 local function getError(endpoint)
     local data, err = Client.get(base, key, endpoint or "/system")
@@ -265,11 +406,13 @@ test("does not substitute zero for an absent or invalid count", function()
     end
 end)
 
-test("reports HTTP errors without revealing response bodies", function()
-    for _, code in ipairs({ 401, 403, 404, 500, 302 }) do
+test("classifies transient HTTP errors without revealing response bodies", function()
+    for _, code in ipairs({ 401, 403, 404, 408, 429, 500, 503, 599, 302 }) do
         request_handler = respond(key .. " fixture-hotspot-secret", code)
         local err = getError()
         contains(err, (code == 401 or code == 403) and "Authentication" or tostring(code))
+        local _, _, kind = Client.get(base, key, "/system")
+        equal(kind, (code == 408 or code == 429 or code >= 500) and "transient" or nil)
         restored()
     end
 end)
@@ -394,53 +537,463 @@ test("warns when a settings backup cannot be removed", function()
     missing(shown[#shown].text, "Saved API key cleared.")
 end)
 
-test("shows LAN-only status, omits passwords and refreshes instead of appending", function()
+test("shows live LAN status, omits passwords and refreshes the same page", function()
     local plugin = manager()
-    plugin:showStatus("summary")
-    local page = shown[#shown]
+    local page = openStatus(plugin)
     local text = rows(page)
     contains(text, "Hotspot: Running")
     contains(text, "SSID: Test AP")
-    contains(text, "Reported clients: 1")
-    contains(text, "Not exposed by the API")
+    contains(text, "Reported: 1")
+    contains(text, "not exposed by the API")
+    contains(text, "[Wi-Fi] kindle: IP: 10.3.141.2\nMAC: 00:00:00:00:00:01")
     missing(text, "fixture-hotspot-secret")
     equal(state.connected, 1)
-    page.kv_pairs[1].callback(page)
-    equal(closed[1], page)
-    equal(#shown[#shown].kv_pairs, #page.kv_pairs)
+    equal(page.columns, 2)
+    equal(page.page_count, 1)
+    equal(state.jobs[page.refresh_task], 15)
+    local old_layout = page[1]
+    page.controls.refresh.callback()
+    equal(#closed, 0)
+    equal(#shown, 1)
+    equal(page.page, 1)
+    equal(old_layout.freed, true)
     equal(state.calls, 6)
+    contains(page.subtitle, "Last attempt:")
 end)
 
-test("labels partial errors without inventing offline or empty data", function()
+test("reports initial partial errors in overall status, not in cards", function()
     local normal = request_handler
     request_handler = function(request)
         if request.url:match("/system$") then return nil, "closed" end
         return normal(request)
     end
-    manager():showStatus("summary")
-    local text = rows(shown[#shown])
-    contains(text, "System: Unavailable:")
+    local page = openStatus(manager())
+    local text = rows(page)
+    contains(text, "System: Not loaded")
     contains(text, "SSID: Test AP")
     missing(text, "Stopped")
-    missing(text, "Reported clients: 0")
+    missing(text, "Reported: 0")
+    contains(page.subtitle, "Partial | Last attempt:")
+    page:showRefreshStatus()
+    contains(shown[#shown].text, "System: Cannot reach")
+    missing(text, "Cannot reach")
 end)
 
 test("renders clients and interfaces and distinguishes empty from failed", function()
     local plugin = manager()
-    plugin:showStatus("clients")
-    contains(rows(shown[#shown]), "IP address: 10.3.141.2")
+    local page = openStatus(plugin, "clients")
+    contains(rows(page), "IP: 10.3.141.2")
     plugin:showStatus("networking")
     local text = rows(shown[#shown])
     contains(text, "Interface: wlan0")
     contains(text, "Netmask: Unavailable")
     request_handler = respond('{"active_clients_amount":0,"active_clients":[]}')
-    plugin:showStatus("clients")
-    contains(rows(shown[#shown]), "No clients returned")
+    page = openStatus(plugin, "clients")
+    contains(rows(page), "No clients returned")
     request_handler = function() return nil, "closed" end
-    plugin:showStatus("clients")
-    text = rows(shown[#shown])
-    contains(text, "Unavailable:")
-    missing(text, "No clients returned")
+    runScheduled(page.refresh_task)
+    text = rows(page)
+    contains(text, "No clients returned")
+    contains(page.subtitle, "Stale | Last attempt:")
+    missing(text, "Cannot reach")
+end)
+
+test("sorts client cards and uses an address when hostname is missing", function()
+    request_handler = respond(JSON.encode{
+        active_clients_amount = 3,
+        active_clients = {
+            { hostname = "Zulu", mac_address = "03", ip_address = "10.0.0.3", connection_type = "ethernet" },
+            { hostname = "*", mac_address = "01", ip_address = "10.0.0.1" },
+            { hostname = "alpha\nname", mac_address = "02", ip_address = "10.0.0.2", connection_type = "wireless" },
+        },
+    })
+    local page = openStatus(manager(), "clients")
+    contains(page.cards[1].body, "10.0.0.1")
+    equal(page.cards[1].label, "[Unavailable] 10.0.0.1")
+    equal(page.cards[2].label, "[Wi-Fi] alpha name")
+    equal(page.cards[3].label, "[Ethernet] Zulu")
+    equal(select(2, page.cards[2].body:gsub("\n", "")), 1)
+    page.card_widgets[3]:onTapCard()
+    contains(shown[#shown].text, "MAC: 03")
+end)
+
+test("timer retains stale clients on transient errors and clears the indicator on recovery", function()
+    local page = openStatus(manager())
+    local normal = request_handler
+    request_handler = function(request)
+        if request.url:match("/clients$") then return nil, "closed" end
+        return normal(request)
+    end
+    local previous_clients = page.snapshot.clients
+    local previous_success = page.last_success.clients
+    runScheduled(page.refresh_task)
+    equal(page.snapshot.clients, previous_clients)
+    equal(page.last_success.clients, previous_success)
+    contains(rows(page), "kindle")
+    contains(page.subtitle, "Stale | Last attempt:")
+    equal(page.stale_sections.clients, true)
+    equal(state.jobs[page.refresh_task], 15)
+    request_handler = normal
+    runScheduled(page.refresh_task)
+    contains(rows(page), "kindle")
+    contains(page.subtitle, "Online | Last attempt:")
+    equal(next(page.stale_sections), nil)
+    equal(#shown, 1)
+end)
+
+test("retains each successful endpoint independently during transient server errors", function()
+    local page = openStatus(manager())
+    local previous_system, previous_ap = page.snapshot.system, page.snapshot.ap
+    local normal = request_handler
+    request_handler = function(request)
+        if request.url:match("/system$") then return respond("", 503)(request) end
+        if request.url:match("/ap$") then return nil, "timeout" end
+        return respond('{"active_clients_amount":0,"active_clients":[]}')(request)
+    end
+    runScheduled(page.refresh_task)
+    equal(page.snapshot.system, previous_system)
+    equal(page.snapshot.ap, previous_ap)
+    equal(#page.snapshot.clients.active_clients, 0)
+    contains(rows(page), "No clients returned")
+    missing(rows(page), "kindle")
+    equal(page.health, "Stale")
+    equal(page.stale_sections.system, true)
+    equal(page.stale_sections.ap, true)
+    equal(page.stale_sections.clients, nil)
+    page:showRefreshStatus()
+    contains(shown[#shown].text, "System: RaspAP returned HTTP 503")
+    contains(shown[#shown].text, "Last success:")
+    missing(shown[#shown].text, key)
+    package.loaded["ui/uimanager"]:close(shown[#shown])
+    request_handler = normal
+    runScheduled(page.refresh_task)
+    equal(page.health, "Online")
+    contains(rows(page), "kindle")
+end)
+
+test("does not display errors as cards when there is no previous successful data", function()
+    request_handler = function() return nil, "closed" end
+    local page = openStatus(manager())
+    equal(page.health, "Unavailable")
+    equal(page.snapshot.clients, nil)
+    equal(page.client_summary, "Clients: unavailable")
+    contains(rows(page), "Not loaded")
+    missing(rows(page), "No clients returned")
+    missing(rows(page), "Cannot reach")
+    for _, card in ipairs(page.card_widgets) do equal(card.info_icon, nil) end
+    contains(page.subtitle, "Unavailable | Last attempt:")
+    page:showRefreshStatus()
+    contains(shown[#shown].text, "Cannot reach")
+end)
+
+test("clears retained endpoint data for authentication or invalid response failures", function()
+    local page = openStatus(manager(), "clients")
+    for _, failure in ipairs({ respond("", 403), respond("{invalid"), respond('{"active_clients":{}}') }) do
+        request_handler = respond(responses["/clients"])
+        runScheduled(page.refresh_task)
+        contains(rows(page), "kindle")
+        request_handler = failure
+        runScheduled(page.refresh_task)
+        equal(page.snapshot.clients, nil)
+        equal(page.health, "Unavailable")
+        missing(rows(page), "kindle")
+        contains(rows(page), "Not loaded")
+    end
+end)
+
+test("does not reuse cached information for a changed server or API key", function()
+    local page = openStatus(manager())
+    request_handler = function() return nil, "closed" end
+    settings:saveSetting("url", "http://different-pi:8081")
+    runScheduled(page.refresh_task)
+    equal(next(page.snapshot), nil)
+    equal(next(page.last_success), nil)
+    equal(page.health, "Unavailable")
+    missing(rows(page), "test-pi")
+    request_handler = respond(responses["/clients"])
+    settings:saveSetting("url", base)
+    local clients_page = openStatus(manager(), "clients")
+    contains(rows(clients_page), "kindle")
+    settings:saveSetting("api_key", "fixture-rotated-key")
+    request_handler = function() return nil, "closed" end
+    runScheduled(clients_page.refresh_task)
+    equal(next(clients_page.snapshot), nil)
+    missing(rows(clients_page), "kindle")
+end)
+
+test("does not fetch behind a dialog or while suspended, and cleans up on close", function()
+    local ui = package.loaded["ui/uimanager"]
+    local page = openStatus(manager(), "clients")
+    local cover = { text = "fixture dialog" }
+    ui:show(cover)
+    runScheduled(page.refresh_task)
+    equal(state.calls, 1)
+    equal(state.jobs[page.refresh_task], 15)
+    ui:close(cover)
+    runScheduled(page.refresh_task)
+    equal(state.calls, 2)
+    page:onSuspend()
+    equal(state.jobs[page.refresh_task], nil)
+    page.refresh_task()
+    equal(state.calls, 2)
+    page:onResume()
+    equal(state.jobs[page.refresh_task], 1)
+    runScheduled(page.refresh_task)
+    equal(state.calls, 3)
+    page:onClose()
+    equal(state.jobs[page.refresh_task], nil)
+    page.refresh_task()
+    page:onResume()
+    equal(state.calls, 3)
+    equal(state.jobs[page.refresh_task], nil)
+end)
+
+test("supports paused auto-refresh with a working manual refresh", function()
+    local page = openStatus(manager(), "clients")
+    page.controls.pause.callback()
+    equal(state.jobs[page.refresh_task], nil)
+    equal(page.controls.pause.text, "Resume updates")
+    page.controls.refresh.callback()
+    equal(state.calls, 2)
+    equal(state.jobs[page.refresh_task], nil)
+    page.controls.pause.callback()
+    equal(state.jobs[page.refresh_task], 15)
+    runScheduled(page.refresh_task)
+    equal(state.calls, 3)
+end)
+
+test("does not prompt for Wi-Fi or send requests when disconnected", function()
+    local page = openStatus(manager(), "clients")
+    state.is_connected = false
+    runScheduled(page.refresh_task)
+    equal(state.calls, 1)
+    equal(state.connected, 1)
+    contains(page.subtitle, "Stale | Last attempt:")
+    contains(page.errors[1], "Wi-Fi is disconnected")
+    contains(rows(page), "kindle")
+    missing(rows(page), "Wi-Fi is disconnected")
+    state.is_connected = true
+    runScheduled(page.refresh_task)
+    equal(state.calls, 2)
+    contains(rows(page), "kindle")
+    settings:delSetting("api_key")
+    runScheduled(page.refresh_task)
+    equal(state.calls, 2)
+    contains(page.subtitle, "Unavailable | Last attempt:")
+    contains(page.errors[1], "Configure")
+    missing(rows(page), "kindle")
+    missing(rows(page), key)
+end)
+
+test("closing or replacing a dashboard cancels its polling", function()
+    local plugin = manager()
+    local first = openStatus(plugin)
+    local second = openStatus(plugin, "clients")
+    equal(first.closed, true)
+    equal(state.jobs[first.refresh_task], nil)
+    equal(state.jobs[second.refresh_task], 15)
+    plugin:onCloseWidget()
+    equal(second.closed, true)
+    equal(state.jobs[second.refresh_task], nil)
+end)
+
+test("reinitializing the menu does not replace the scheduled task or unpause it", function()
+    local page = openStatus(manager(), "clients")
+    local task = page.refresh_task
+    page.controls.pause.callback()
+    page:init()
+    equal(page.refresh_task, task)
+    equal(page.auto_refresh, false)
+    equal(state.jobs[task], nil)
+    contains(page.subtitle, "Last attempt:")
+end)
+
+local function clientPayload(count)
+    local clients = {}
+    for i = 1, count do
+        clients[i] = {
+            hostname = string.format("Client %02d", i),
+            ip_address = "10.0.0." .. i,
+            mac_address = string.format("00:00:00:00:00:%02x", i),
+            connection_type = "wireless",
+        }
+    end
+    return JSON.encode{ active_clients_amount = count, active_clients = clients }
+end
+
+test("fits system, hotspot and eight clients on one Paperwhite-sized page", function()
+    local normal = request_handler
+    request_handler = function(request)
+        if request.url:match("/clients$") then return respond(clientPayload(8))(request) end
+        return normal(request)
+    end
+    local page = openStatus(manager())
+    equal(#page.cards, 10)
+    equal(page.page_count, 1)
+    equal(#page.card_widgets, 10)
+    assert(page.layout_height <= state.screen_height, "dashboard exceeds screen height")
+    assert(page[1]:getSize().w <= state.screen_width, "dashboard exceeds screen width")
+end)
+
+test("renders flush rounded headers with a reserved right-aligned white info icon", function()
+    local page = openStatus(manager())
+    for _, card in ipairs(page.card_widgets) do
+        equal(card.header_text.fgcolor, "white")
+        equal(card.frame.background, nil)
+        equal(card.frame.padding, 0)
+        equal(card.frame.color, "black")
+        assert(card.frame.radius > 0)
+        assert(card.frame.bordersize > 0)
+        missing(card.header_text.text, "[Tap]")
+        equal(card.info_icon.icon, "notice-info")
+        equal(card.info_icon.invert, true)
+        equal(card.header[1][3], card.info_icon)
+        equal(card.header[1].allow_mirroring, false)
+        local header_content_width = card.header[1]:getSize().w
+        equal(header_content_width + 2 * card.header.padding + 2 * card.frame.bordersize, card.width)
+        assert(card.ges_events.TapCard)
+    end
+    request_handler = respond('{"active_clients_amount":0,"active_clients":[]}')
+    page = openStatus(manager(), "clients")
+    local empty = page.card_widgets[1]
+    equal(empty.header_text.text, "Clients")
+    equal(empty.ges_events.TapCard, nil)
+    equal(empty.info_icon, nil)
+    equal(empty:onTapCard(), false)
+    contains(empty.body_text.text, "No clients returned")
+end)
+
+test("paints edge-to-edge black headers without overwriting rounded outside corners", function()
+    local page = openStatus(manager())
+    local frame = page.card_widgets[1].frame
+    local size = frame:getSize()
+    local radius = frame.radius + frame.bordersize
+    local header_height = frame.header_height + frame.bordersize
+    local samples = {
+        corner = { x = 0, y = 0 },
+        top = { x = math.floor(size.w / 2), y = 0 },
+        edge = { x = 1, y = radius },
+        body = { x = math.floor(size.w / 2), y = header_height + 1 },
+    }
+    local canvas = {}
+    local function fill(x, y, width, height, color, curve)
+        for _, pixel in pairs(samples) do
+            local px, py = pixel.x - x, pixel.y - y
+            if px >= 0 and py >= 0 and px < width and py < height then
+                local dx = math.max(curve - px, px - (width - curve), 0)
+                local dy = math.max(curve - py, py - (height - curve), 0)
+                if curve == 0 or dx * dx + dy * dy <= curve * curve then pixel.color = color end
+            end
+        end
+    end
+    function canvas:paintRoundedRect(x, y, width, height, color, curve)
+        fill(x, y, width, height, color, curve)
+    end
+    function canvas:paintRect(x, y, width, height, color)
+        fill(x, y, width, height, color, 0)
+    end
+    frame:paintTo(canvas, 0, 0)
+    equal(samples.corner.color, nil)
+    equal(samples.top.color, "black")
+    equal(samples.edge.color, "black")
+    equal(samples.body.color, "white")
+    equal(frame.painted_at.x, 0)
+end)
+
+test("separates system and client rows with section headings, repeated on later pages", function()
+    local normal = request_handler
+    request_handler = function(request)
+        if request.url:match("/clients$") then return respond(clientPayload(30))(request) end
+        return normal(request)
+    end
+    local page = openStatus(manager())
+    equal(page.section_headings[1].text, "System / Hotspot")
+    contains(page.section_headings[2].text, "Clients  |  Reported: 30")
+    equal(page.cards[1].section, "details")
+    equal(page.cards[2].section, "details")
+    equal(page.cards[3].section, "clients")
+    page:onNextPage()
+    equal(#page.section_headings, 1)
+    contains(page.section_headings[1].text, "Clients")
+    assert(page.layout_height <= state.screen_height)
+    local measured_height = 2 * page[1].padding
+    for _, child in ipairs(page[1][1]) do measured_height = measured_height + child:getSize().h end
+    equal(page.layout_height, measured_height)
+end)
+
+test("paginates overflow, retains the page on refresh and clamps after shrink", function()
+    local count = 30
+    request_handler = function(request) return respond(clientPayload(count))(request) end
+    local page = openStatus(manager(), "clients")
+    assert(page.page_count > 1)
+    assert(page.layout_height <= state.screen_height)
+    equal(page.controls.previous.enabled, false)
+    page.controls.next.callback()
+    equal(page.page, 2)
+    contains(page.page_label.text, "2 /")
+    assert(page.layout_height <= state.screen_height)
+    runScheduled(page.refresh_task)
+    equal(page.page, 2)
+    page:onSwipe(nil, { direction = "east" })
+    equal(page.page, 1)
+    count = 1
+    page:onNextPage()
+    runScheduled(page.refresh_task)
+    equal(page.page, 1)
+    equal(page.page_count, 1)
+    equal(page.controls.next, nil)
+end)
+
+test("adapts to narrow screens and bounds long card text", function()
+    request_handler = respond(JSON.encode{
+        active_clients_amount = 1,
+        active_clients = { {
+            hostname = string.rep("Long hostname ", 40),
+            mac_address = "00:00:00:00:00:01",
+            ip_address = "10.0.0.1",
+        } },
+    })
+    local page = openStatus(manager(), "clients")
+    state.screen_width, state.screen_height, state.screen_scale = 320, 800, 1
+    page:onScreenResize()
+    equal(page.columns, 1)
+    assert(page.layout_height <= state.screen_height)
+    assert(page[1]:getSize().w <= state.screen_width)
+    equal(page.card_widgets[1].body_text.height_overflow_show_ellipsis, true)
+    page.card_widgets[1]:onTapCard()
+    contains(shown[#shown].text, string.rep("Long hostname ", 40))
+    equal(state.jobs[page.refresh_task], 15)
+end)
+
+test("launcher flag opens status only once after initialization", function()
+    local class = loadManager("1")
+    local plugin = manager(class)
+    equal(#shown, 0)
+    equal(state.calls, 0)
+    equal(state.jobs[plugin.startup_task], 0)
+    runScheduled(plugin.startup_task)
+    local page = plugin.status_page
+    assert(page)
+    equal(state.calls, 0)
+    runScheduled(page.refresh_task)
+    equal(state.calls, 3)
+    local second = manager(class)
+    equal(second.startup_task, nil)
+    equal(second.status_page, nil)
+    plugin:onCloseWidget()
+    equal(next(state.jobs), nil)
+end)
+
+test("normal startup is unchanged and teardown cancels a pending startup task", function()
+    local plugin = manager()
+    equal(plugin.startup_task, nil)
+    equal(next(state.jobs), nil)
+    plugin = manager(loadManager("1"))
+    local task = plugin.startup_task
+    plugin:onCloseWidget()
+    equal(state.jobs[task], nil)
+    equal(state.calls, 0)
+    equal(#shown, 0)
 end)
 
 os.remove(temp)
