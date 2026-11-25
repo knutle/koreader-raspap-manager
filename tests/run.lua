@@ -93,7 +93,7 @@ package.loaded.device = { screen = screen, hasKeys = function() return false end
 package.loaded["ui/font"] = {
     getFace = function(_, _name, size) return { size = size * state.screen_scale } end,
 }
-package.loaded["ffi/blitbuffer"] = { COLOR_BLACK = "black", COLOR_WHITE = "white" }
+package.loaded["ffi/blitbuffer"] = { COLOR_BLACK = "black", COLOR_WHITE = "white", COLOR_DARK_GRAY = "gray" }
 package.loaded["ui/geometry"] = { new = function(_, value) return value end }
 package.loaded["ui/gesturerange"] = widget
 local input = container:extend{}
@@ -108,17 +108,24 @@ local function visual(kind)
                 h = self.face.size * 1.25,
             }
         elseif kind == "textbox" then
-            local line = self.face.size * (1 + self.line_height)
-            return { w = self.width, h = math.floor(self.height / line) * line }
+            local line = self.face.size * (1 + (self.line_height or 0.3))
+            if self.height then return { w = self.width, h = math.floor(self.height / line) * line } end
+            local lines = 0
+            for text in (self.text .. "\n"):gmatch("(.-)\n") do
+                lines = lines + math.max(1, math.ceil(#text * self.face.size * 0.55 / self.width))
+            end
+            return { w = self.width, h = lines * line }
+        elseif kind == "scrolltext" then
+            return { w = self.width, h = self.height }
         elseif kind == "button" then
-            return { w = self.width, h = self.text_font_size * state.screen_scale * 1.25 + 2 * self.padding + 4 }
+            return self.frame:getSize()
         elseif kind == "title" then
             return { w = self.width, h = (20 + 13) * state.screen_scale * 1.25 + 2 * self.button_padding }
         elseif kind == "horizontal-span" then
             return { w = self.width, h = 0 }
         elseif kind == "vertical-span" then
             return { w = 0, h = self.width }
-        elseif kind == "left" then
+        elseif kind == "left" or kind == "center" then
             return self.dimen
         elseif kind == "icon" then
             return { w = self.width, h = self.height }
@@ -142,14 +149,21 @@ local function visual(kind)
     end
     function class:setText(text) self.text = text end
     function class:disable() self.enabled = false end
-    function class:paintTo(_bb, x, y)
+    function class:paintTo(bb, x, y)
         self.painted_at = { x = x, y = y }
+        local size = self:getSize()
+        self.dimen = { x = x, y = y, w = size.w, h = size.h }
+        if kind == "frame" and self.background and bb.paintRoundedRect then
+            bb:paintRoundedRect(x, y, size.w, size.h, self.background,
+                self.radius and self.radius + (self.bordersize or 0) or nil)
+        end
     end
     return class
 end
 for name, kind in pairs({
     ["ui/widget/textwidget"] = "text",
     ["ui/widget/textboxwidget"] = "textbox",
+    ["ui/widget/scrolltextwidget"] = "scrolltext",
     ["ui/widget/button"] = "button",
     ["ui/widget/titlebar"] = "title",
     ["ui/widget/iconwidget"] = "icon",
@@ -159,8 +173,33 @@ for name, kind in pairs({
     ["ui/widget/verticalgroup"] = "vertical",
     ["ui/widget/container/framecontainer"] = "frame",
     ["ui/widget/container/leftcontainer"] = "left",
+    ["ui/widget/container/centercontainer"] = "center",
 }) do
     package.loaded[name] = visual(kind)
+end
+local NativeButton = package.loaded["ui/widget/button"]
+function NativeButton:init()
+    if self.enabled == nil then self.enabled = true end
+    self.bordersize = self.bordersize or screen:scaleBySize(1)
+    if self.text then
+        self.label_widget = package.loaded["ui/widget/textwidget"]:new{
+            text = self.text, face = package.loaded["ui/font"]:getFace("cfont", self.text_font_size),
+            fgcolor = self.enabled and "black" or "gray",
+        }
+    else
+        self.label_widget = package.loaded["ui/widget/iconwidget"]:new{
+            icon = self.icon, width = self.icon_width, height = self.icon_height,
+        }
+    end
+    local pad = 2 * ((self.padding or 0) + self.bordersize)
+    self.label_container = package.loaded["ui/widget/container/centercontainer"]:new{
+        dimen = { w = self.width - pad, h = self.label_widget:getSize().h }, self.label_widget,
+    }
+    self.frame = package.loaded["ui/widget/container/framecontainer"]:new{
+        padding = self.padding, bordersize = self.bordersize, radius = self.radius,
+        background = "white", color = "black", self.label_container,
+    }
+    self[1] = self.frame
 end
 package.loaded["ui/uimanager"] = {
     show = function(_, value)
@@ -186,6 +225,10 @@ package.loaded["ui/uimanager"] = {
         return false
     end,
     setDirty = function() end,
+    widgetRepaint = function(_, value, x, y)
+        state.repainted = value
+        if state.canvas then value:paintTo(state.canvas, x, y) end
+    end,
 }
 package.loaded["ui/network/manager"] = {
     runWhenConnected = function(_, callback) state.connected = state.connected + 1; callback() end,
@@ -473,6 +516,9 @@ test("registers tools menu without making startup requests", function()
     equal(#menu.raspapmanager.sub_item_table, 7)
     menu.raspapmanager.sub_item_table[4].callback()
     contains(shown[#shown].text, "API reachable: test-pi")
+    equal(shown[#shown].icon, require("raspap_icons").system)
+    equal(shown[#shown].title, "Connection test")
+    assert(shown[#shown].panel)
     equal(state.connected, 1)
 end)
 
@@ -837,7 +883,9 @@ end)
 
 test("renders flush rounded headers with a reserved right-aligned white info icon", function()
     local page = openStatus(manager())
-    for _, card in ipairs(page.card_widgets) do
+    local icons = require("raspap_icons")
+    local expected_icons = { icons.system, icons.hotspot, icons.client }
+    for index, card in ipairs(page.card_widgets) do
         equal(card.header_text.fgcolor, "white")
         equal(card.frame.background, nil)
         equal(card.frame.padding, 0)
@@ -845,7 +893,7 @@ test("renders flush rounded headers with a reserved right-aligned white info ico
         assert(card.frame.radius > 0)
         assert(card.frame.bordersize > 0)
         missing(card.header_text.text, "[Tap]")
-        equal(card.info_icon.icon, "notice-info")
+        equal(card.info_icon.file, expected_icons[index])
         equal(card.info_icon.invert, true)
         equal(card.header[1][3], card.info_icon)
         equal(card.header[1].allow_mirroring, false)
@@ -861,6 +909,126 @@ test("renders flush rounded headers with a reserved right-aligned white info ico
     equal(empty.info_icon, nil)
     equal(empty:onTapCard(), false)
     contains(empty.body_text.text, "No clients returned")
+end)
+
+test("opens matching styled details for each card and pauses polling behind the dialog", function()
+    local page = openStatus(manager())
+    local expected = {
+        { icon = "system", field = "Hostname: test-pi" },
+        { icon = "hotspot", field = "Interface: wlan0" },
+        { icon = "client", field = "Connection: Wi-Fi" },
+    }
+    for index, spec in ipairs(expected) do
+        local card = page.card_widgets[index]
+        card:onTapCard()
+        local details = shown[#shown]
+        equal(details.title, card.label)
+        equal(details.panel.info_icon.file, require("raspap_icons")[spec.icon])
+        equal(details.panel.info_icon.invert, true)
+        equal(details.panel.header_text.fgcolor, "white")
+        contains(details.scroll.text, spec.field)
+        assert(details.panel:getSize().h <= state.screen_height)
+        assert(details.panel:getSize().w <= state.screen_width)
+        equal(details.panel.ges_events.TapCard, nil)
+        local calls = state.calls
+        runScheduled(page.refresh_task)
+        equal(state.calls, calls)
+        details.close_button.callback()
+        equal(details.panel.freed, true)
+        equal(state.stack[#state.stack], page)
+        runScheduled(page.refresh_task)
+        equal(state.calls, calls + 3)
+    end
+end)
+
+test("loads the bundled official favicon in the status button and status details", function()
+    local icons = require("raspap_icons")
+    for kind, path in pairs(icons) do
+        local asset = assert(io.open(path, "rb"))
+        local prefix = asset:read(64)
+        asset:close()
+        if kind == "raspap" then equal(prefix:sub(1, 8), "\137PNG\r\n\26\n")
+        else contains(prefix, "<svg") end
+    end
+    local page = openStatus(manager())
+    equal(page.controls.status.label_widget.file, icons.raspap)
+    equal(page.controls.status.label_container[1], page.controls.status.label_widget)
+    equal(page.titlebar.left_icon, nil)
+    page.controls.status.callback()
+    local details = shown[#shown]
+    equal(details.icon, icons.raspap)
+    equal(details.panel.info_icon.file, icons.raspap)
+    equal(details.panel.info_icon.invert, false)
+    equal(details.panel.info_icon.alpha, true)
+    contains(details.text, "Last attempt:")
+    contains(details.text, "All API requests succeeded")
+    contains(details.text, "Last success:")
+end)
+
+test("bounds styled details and preserves full text through scrolling and resizing", function()
+    local Details = require("raspap_details")
+    state.screen_width, state.screen_height, state.screen_scale = 320, 800, 1
+    local content = string.rep("A very long hostname and status description ", 600)
+    local details = Details:new{ title = "Client details", icon = require("raspap_icons").client, text = content }
+    package.loaded["ui/uimanager"]:show(details)
+    equal(details.scroll.text, content)
+    assert(details.scroll.height < #content)
+    assert(details.panel:getSize().h <= state.screen_height)
+    assert(details.panel:getSize().w <= state.screen_width)
+    assert(details.close_button:getSize().h > 0)
+    local old_panel = details.panel
+    state.screen_width, state.screen_height = 800, 320
+    details:onScreenResize()
+    equal(old_panel.freed, true)
+    equal(details.scroll.text, content)
+    assert(details.scroll.height > 0)
+    assert(details.panel:getSize().h <= state.screen_height)
+    assert(details.panel:getSize().w <= state.screen_width)
+    details:onClose()
+    equal(#state.stack, 0)
+end)
+
+test("paints button press feedback flush to the border with unchanged rounded corners", function()
+    request_handler = function(request) return respond(clientPayload(30))(request) end
+    local page = openStatus(manager(), "clients")
+    local buttons = {}
+    for _, button in pairs(page.controls) do
+        if button.callback and button.enabled then table.insert(buttons, button) end
+    end
+    page.card_widgets[1]:onTapCard()
+    table.insert(buttons, shown[#shown].close_button)
+    local canvas = {}
+    function canvas:paintRoundedRect(x, y, width, height, color, radius)
+        self.last = { x = x, y = y, width = width, height = height, color = color, radius = radius }
+    end
+    state.canvas = canvas
+    local calls = state.calls
+    for _, button in ipairs(buttons) do
+        local radius = button.frame.radius
+        local size = button.frame:getSize()
+        button.frame:paintTo(canvas, 10, 20)
+        button:_doFeedbackHighlight()
+        equal(canvas.last.color, "black")
+        equal(canvas.last.x, 10)
+        equal(canvas.last.y, 20)
+        equal(canvas.last.width, size.w)
+        equal(canvas.last.height, size.h)
+        equal(canvas.last.radius, radius + button.frame.bordersize)
+        equal(button.frame.invert, false)
+        if button.text then equal(button.label_widget.fgcolor, "white")
+        else equal(button.label_widget.invert, true) end
+        button:_undoFeedbackHighlight()
+        equal(canvas.last.color, "white")
+        equal(button.frame.radius, radius)
+        if button.text then equal(button.label_widget.fgcolor, "black")
+        else equal(button.label_widget.invert, false) end
+        button:onFocus()
+        button:_undoFeedbackHighlight()
+        equal(button.frame.background, "black")
+        button:onUnfocus()
+        equal(button.frame.background, "white")
+    end
+    equal(state.calls, calls)
 end)
 
 test("paints edge-to-edge black headers without overwriting rounded outside corners", function()

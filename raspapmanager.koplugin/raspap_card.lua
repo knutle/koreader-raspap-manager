@@ -28,13 +28,14 @@ function CardFrame:paintTo(bb, x, y)
 end
 
 function Card:init()
-    local border, padding = Screen:scaleBySize(1), Screen:scaleBySize(5)
+    local border, padding = Screen:scaleBySize(1), self.padding or Screen:scaleBySize(5)
     local text_width = self.width - 2 * (border + padding)
-    local icon_size, icon_gap = Screen:scaleBySize(14), Screen:scaleBySize(4)
-    local label_width = text_width - (self.callback and (icon_size + icon_gap) or 0)
+    local icon_size, icon_gap = Screen:scaleBySize(self.icon_size or 20), Screen:scaleBySize(4)
+    local has_icon = self.callback or self.show_icon
+    local label_width = text_width - (has_icon and (icon_size + icon_gap) or 0)
     self.header_text = TextWidget:new{
         text = self.label,
-        face = Font:getFace("smallinfofont", 14),
+        face = Font:getFace("smallinfofont", self.header_font_size or 14),
         fgcolor = Blitbuffer.COLOR_WHITE,
         bold = true,
         padding = 0,
@@ -49,9 +50,11 @@ function Card:init()
             self.header_text,
         },
     }
-    if self.callback then
+    if has_icon then
         self.info_icon = IconWidget:new{
-            icon = "notice-info", width = icon_size, height = icon_size, invert = true,
+            icon = not self.icon and "notice-info" or nil, file = self.icon,
+            width = icon_size, height = icon_size, invert = self.icon_invert ~= false,
+            alpha = self.icon_invert == false,
         }
         table.insert(header_content, HorizontalSpan:new{ width = icon_gap })
         table.insert(header_content, self.info_icon)
@@ -61,7 +64,7 @@ function Card:init()
         padding = padding,
         header_content,
     }
-    self.body_text = TextBoxWidget:new{
+    self.body_text = not self.body_widget and TextBoxWidget:new{
         text = self.body,
         face = Font:getFace("smallinfofont", 16),
         fgcolor = Blitbuffer.COLOR_BLACK,
@@ -71,7 +74,7 @@ function Card:init()
         height_overflow_show_ellipsis = true,
         line_height = 0.1,
         alignment = "left",
-    }
+    } or nil
     self.frame = CardFrame:new{
         color = Blitbuffer.COLOR_BLACK,
         bordersize = border,
@@ -81,7 +84,7 @@ function Card:init()
         VerticalGroup:new{
             align = "left",
             self.header,
-            FrameContainer:new{ bordersize = 0, padding = padding, self.body_text },
+            FrameContainer:new{ bordersize = 0, padding = padding, self.body_widget or self.body_text },
         },
     }
     self[1] = self.frame
